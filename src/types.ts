@@ -45,6 +45,7 @@ export interface AgentCardConfig {
   name: string;
   description?: string;
   url?: string;
+  grpcProxy?: boolean;
   skills: Array<AgentSkillConfig | string>;
 }
 
@@ -81,6 +82,16 @@ export interface DnsDiscoveryConfig {
   mergeWithStatic: boolean;
 }
 
+export interface BeaconConfig {
+  /** Whether the beacon bridge routes (/api/beacon, /api/agents/*) are enabled on this node. */
+  enabled?: boolean;
+  /**
+   * If true and shrimp-hub is unreachable, returns HTTP 202 (degraded) instead of HTTP 503 (service unavailable).
+   * @default false
+   */
+  allowDegradedFallback?: boolean;
+}
+
 export interface GatewayConfig {
   agentCard: AgentCardConfig;
   server: {
@@ -94,6 +105,7 @@ export interface GatewayConfig {
   };
   peers: PeerConfig[];
   security: SecurityConfig;
+  beacon?: BeaconConfig;
   routing: {
     defaultAgentId: string;
     rules: import("./routing-rules.js").RoutingRule[];

@@ -18,6 +18,7 @@ import { Server as GrpcServer, ServerCredentials, status as GrpcStatus } from "@
 import express from "express";
 
 import { buildAgentCard } from "./src/agent-card.js";
+import { registerBeaconBridge } from "./src/beacon-bridge.js";
 import { A2AClient } from "./src/client.js";
 import {
   DnsDiscoveryManager,
@@ -118,11 +119,13 @@ function resolveConfiguredPath(
 
 function parseAgentCard(raw: Record<string, unknown>): AgentCardConfig {
   const skills = Array.isArray(raw.skills) ? raw.skills : [];
+  const grpcProxy = typeof raw.grpcProxy === "boolean" ? raw.grpcProxy : undefined;
 
   return {
     name: asString(raw.name, "OpenClaw A2A Gateway"),
     description: asString(raw.description, "A2A bridge for OpenClaw agents"),
     url: asString(raw.url, ""),
+    ...(grpcProxy !== undefined ? { grpcProxy } : {}),
     skills: skills.map((entry) => {
       if (typeof entry === "string") {
         return entry;
@@ -180,6 +183,7 @@ export function parseConfig(raw: unknown, resolvePath?: (nextPath: string) => st
   const retry = asObject(resilience.retry);
   const circuitBreaker = asObject(resilience.circuitBreaker);
   const discoveryRaw = config.discovery ? asObject(config.discovery) : undefined;
+  const beacon = asObject(config.beacon);
 
   const inboundAuth = asString(security.inboundAuth, "none") as InboundAuth;
 
@@ -210,6 +214,10 @@ export function parseConfig(raw: unknown, resolvePath?: (nextPath: string) => st
       cleanupIntervalMinutes: Math.max(1, asNumber(storage.cleanupIntervalMinutes, 60)),
     },
     peers: parsePeers(config.peers),
+    beacon: {
+      enabled: asBoolean(beacon.enabled, true),
+      allowDegradedFallback: asBoolean(beacon.allowDegradedFallback, false),
+    },
     security: (() => {
       const singleToken = asString(security.token, "");
       const tokenArray = Array.isArray(security.tokens)
@@ -330,9 +338,8 @@ const plugin = {
     const pushStore = new PushNotificationStore();
     const client = new A2AClient();
     const taskStore = new FileTaskStore(config.storage.tasksDir);
-    const agentExecutor = new OpenClawAgentExecutor(api, config);
     const executor = new QueueingAgentExecutor(
-      agentExecutor,
+      new OpenClawAgentExecutor(api, config),
       telemetry,
       config.limits,
       config.routing.defaultAgentId,
@@ -583,6 +590,9 @@ const plugin = {
       );
     }
 
+    // Register standalone ShrimpClan Beacon & Agent verification bridge routes
+    registerBeaconBridge(app, { config });
+
     // Bearer auth middleware for push notification endpoints
     const pushAuthMiddleware = (req: express.Request, res: express.Response, next: express.NextFunction) => {
       if (config.security.inboundAuth === "bearer" && config.security.validTokens.size > 0) {
@@ -819,7 +829,7 @@ const plugin = {
           "Use this when you need to transfer a document, image, or any file to another agent.",
         label: "A2A Send File",
         parameters: sendFileParams,
-        async execute(toolCallId, params) {
+        async execute(toolCallId, params: any) {
           const peer = findPeer(params.peer);
           if (!peer) {
             const available = getEffectivePeers().map((p) => p.name).join(", ") || "(none)";
@@ -966,11 +976,9 @@ const plugin = {
                   resolve(); // Non-fatal: HTTP still works
                   return;
                 }
-                try {
-                  grpcServer!.start();
-                } catch {
-                  // ignore: some grpc-js versions auto-start
-                }
+                // grpc-js >=1.10 auto-starts on bindAsync; start() is a no-op that
+                // emits a DeprecationWarning. Omit it entirely.
+                // https://grpc.github.io/grpc/node/grpc.Server.html#start
                 api.logger.info(
                   `a2a-gateway: gRPC listening on ${config.server.host}:${grpcPort}`
                 );
@@ -1021,7 +1029,6 @@ const plugin = {
         healthManager?.stop();
         auditLogger.close();
         client.destroy();
-        agentExecutor.close();
 
         // Stop task cleanup timer
         if (cleanupTimer) {
